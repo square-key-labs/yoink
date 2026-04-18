@@ -1,14 +1,68 @@
 use crate::error::{Result, YoinkError};
+use crate::knownhosts::KnownHosts;
 use crate::protocols::traits::{Auth, ConnectionConfig, EntryKind, FileEntry, Protocol};
 use async_trait::async_trait;
+use russh::client::{self, Handle, Msg};
+use russh::keys::ssh_key::PrivateKey;
+use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey};
+use russh::Channel;
+use russh_sftp::client::SftpSession;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
+
+struct ServerKeyCheck {
+    host: String,
+    port: u16,
+    known: KnownHosts,
+    outcome: Arc<Mutex<Option<HostKeyOutcome>>>,
+}
+
+#[derive(Debug, Clone)]
+enum HostKeyOutcome {
+    Accepted,
+    Unknown { fingerprint: String },
+    Mismatch,
+}
+
+impl client::Handler for ServerKeyCheck {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &PublicKey,
+    ) -> std::result::Result<bool, Self::Error> {
+        let fp = server_public_key
+            .fingerprint(HashAlg::Sha256)
+            .to_string();
+        let stored = self.known.lookup(&self.host, self.port).ok().flatten();
+        let outcome = match stored {
+            Some(s) if s == fp => HostKeyOutcome::Accepted,
+            Some(_) => HostKeyOutcome::Mismatch,
+            None => HostKeyOutcome::Unknown { fingerprint: fp },
+        };
+        *self.outcome.lock().await = Some(outcome.clone());
+        Ok(matches!(outcome, HostKeyOutcome::Accepted))
+    }
+}
 
 pub struct SftpProtocol {
-    connected: bool,
+    handle: Option<Handle<ServerKeyCheck>>,
+    sftp: Option<SftpSession>,
 }
 
 impl SftpProtocol {
     pub fn new() -> Self {
-        Self { connected: false }
+        Self {
+            handle: None,
+            sftp: None,
+        }
+    }
+
+    fn sftp_ref(&mut self) -> Result<&mut SftpSession> {
+        self.sftp
+            .as_mut()
+            .ok_or(YoinkError::NotConnected)
     }
 }
 
@@ -18,85 +72,274 @@ impl Default for SftpProtocol {
     }
 }
 
+fn map_russh(e: russh::Error) -> YoinkError {
+    YoinkError::Protocol(format!("ssh: {e}"))
+}
+
+fn map_sftp(e: russh_sftp::client::error::Error) -> YoinkError {
+    YoinkError::Protocol(format!("sftp: {e}"))
+}
+
+fn entry_kind_from_perms(file_type: Option<u32>) -> EntryKind {
+    match file_type {
+        Some(m) if m & 0o040000 != 0 => EntryKind::Dir,
+        Some(m) if m & 0o120000 != 0 => EntryKind::Symlink,
+        Some(m) if m & 0o100000 != 0 => EntryKind::File,
+        _ => EntryKind::Other,
+    }
+}
+
 #[async_trait]
 impl Protocol for SftpProtocol {
     async fn connect(&mut self, config: &ConnectionConfig) -> Result<()> {
-        let _ = (config.host.as_str(), config.port, config.username.as_str());
-        let _ = &config.auth;
-        match &config.auth {
-            Auth::Password { .. } | Auth::Key { .. } | Auth::Agent => {}
-        }
-        self.connected = true;
-        Err(YoinkError::Other(
-            "SFTP connect not yet implemented — russh handshake pending".into(),
-        ))
-    }
+        let known = KnownHosts::new(KnownHosts::default_path()?)?;
+        let outcome = Arc::new(Mutex::new(None));
+        let handler = ServerKeyCheck {
+            host: config.host.clone(),
+            port: config.port,
+            known,
+            outcome: outcome.clone(),
+        };
+        let cfg = Arc::new(client::Config::default());
+        let mut handle = client::connect(cfg, (config.host.as_str(), config.port), handler)
+            .await
+            .map_err(map_russh)?;
 
-    async fn disconnect(&mut self) -> Result<()> {
-        self.connected = false;
+        if let Some(o) = outcome.lock().await.clone() {
+            match o {
+                HostKeyOutcome::Accepted => {}
+                HostKeyOutcome::Mismatch => {
+                    return Err(YoinkError::HostKeyMismatch);
+                }
+                HostKeyOutcome::Unknown { fingerprint } => {
+                    if config.verify_host {
+                        return Err(YoinkError::UnknownHost { fingerprint });
+                    }
+                    let known = KnownHosts::new(KnownHosts::default_path()?)?;
+                    known.insert(&config.host, config.port, &fingerprint)?;
+                }
+            }
+        }
+
+        let auth_ok = match &config.auth {
+            Auth::Password { password } => handle
+                .authenticate_password(&config.username, password)
+                .await
+                .map_err(map_russh)?
+                .success(),
+            Auth::Key { private_key, passphrase } => {
+                let key = PrivateKey::from_openssh(private_key).map_err(|e| {
+                    YoinkError::Protocol(format!("key parse: {e}"))
+                })?;
+                let key = if let Some(pass) = passphrase.as_deref().filter(|p| !p.is_empty()) {
+                    key.decrypt(pass).map_err(|e| {
+                        YoinkError::Protocol(format!("key decrypt: {e}"))
+                    })?
+                } else {
+                    key
+                };
+                let key_with_alg = PrivateKeyWithHashAlg::new(Arc::new(key), Some(HashAlg::Sha256));
+                handle
+                    .authenticate_publickey(&config.username, key_with_alg)
+                    .await
+                    .map_err(map_russh)?
+                    .success()
+            }
+            Auth::Agent => {
+                return Err(YoinkError::Other(
+                    "SSH agent auth not yet implemented — use password or key".into(),
+                ));
+            }
+        };
+        if !auth_ok {
+            return Err(YoinkError::Auth);
+        }
+
+        let channel: Channel<Msg> = handle
+            .channel_open_session()
+            .await
+            .map_err(map_russh)?;
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .map_err(map_russh)?;
+        let sftp = SftpSession::new(channel.into_stream())
+            .await
+            .map_err(map_sftp)?;
+
+        self.handle = Some(handle);
+        self.sftp = Some(sftp);
         Ok(())
     }
 
-    async fn list_dir(&mut self, _path: &str) -> Result<Vec<FileEntry>> {
-        self.assert_connected()?;
-        Ok(vec![])
+    async fn disconnect(&mut self) -> Result<()> {
+        self.sftp = None;
+        if let Some(h) = self.handle.take() {
+            let _ = h.disconnect(russh::Disconnect::ByApplication, "bye", "").await;
+        }
+        Ok(())
+    }
+
+    async fn list_dir(&mut self, path: &str) -> Result<Vec<FileEntry>> {
+        let sftp = self.sftp_ref()?;
+        let entries = sftp.read_dir(path).await.map_err(map_sftp)?;
+        let mut out = Vec::new();
+        for entry in entries {
+            let name = entry.file_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+            let md = entry.metadata();
+            let full = format!(
+                "{}{}{}",
+                path.trim_end_matches('/'),
+                if path == "/" { "" } else { "/" },
+                name
+            );
+            out.push(FileEntry {
+                name: name.to_string(),
+                path: full,
+                kind: entry_kind_from_perms(md.permissions),
+                size: md.size.unwrap_or(0),
+                modified_unix: md.mtime.map(|t| t as i64),
+                permissions: md.permissions.map(|p| p & 0o7777),
+            });
+        }
+        Ok(out)
     }
 
     async fn stat(&mut self, path: &str) -> Result<FileEntry> {
-        self.assert_connected()?;
+        let sftp = self.sftp_ref()?;
+        let md = sftp.metadata(path).await.map_err(map_sftp)?;
         Ok(FileEntry {
             name: path.rsplit('/').next().unwrap_or(path).to_string(),
             path: path.to_string(),
-            kind: EntryKind::Other,
-            size: 0,
-            modified_unix: None,
-            permissions: None,
+            kind: entry_kind_from_perms(md.permissions),
+            size: md.size.unwrap_or(0),
+            modified_unix: md.mtime.map(|t| t as i64),
+            permissions: md.permissions.map(|p| p & 0o7777),
         })
     }
 
-    async fn mkdir(&mut self, _path: &str) -> Result<()> {
-        self.assert_connected()
+    async fn mkdir(&mut self, path: &str) -> Result<()> {
+        let sftp = self.sftp_ref()?;
+        sftp.create_dir(path).await.map_err(map_sftp)?;
+        Ok(())
     }
 
-    async fn remove(&mut self, _path: &str) -> Result<()> {
-        self.assert_connected()
+    async fn remove(&mut self, path: &str) -> Result<()> {
+        let sftp = self.sftp_ref()?;
+        let md = sftp.metadata(path).await.map_err(map_sftp)?;
+        if entry_kind_from_perms(md.permissions) == EntryKind::Dir {
+            sftp.remove_dir(path).await.map_err(map_sftp)?;
+        } else {
+            sftp.remove_file(path).await.map_err(map_sftp)?;
+        }
+        Ok(())
     }
 
-    async fn rename(&mut self, _from: &str, _to: &str) -> Result<()> {
-        self.assert_connected()
+    async fn rename(&mut self, from: &str, to: &str) -> Result<()> {
+        let sftp = self.sftp_ref()?;
+        sftp.rename(from, to).await.map_err(map_sftp)?;
+        Ok(())
     }
 
-    async fn chmod(&mut self, _path: &str, _mode: u32) -> Result<()> {
-        self.assert_connected()
+    async fn chmod(&mut self, path: &str, mode: u32) -> Result<()> {
+        let sftp = self.sftp_ref()?;
+        let mut attrs = russh_sftp::protocol::FileAttributes::default();
+        attrs.permissions = Some(mode & 0o7777);
+        sftp.set_metadata(path, attrs).await.map_err(map_sftp)?;
+        Ok(())
     }
 
     async fn upload(
         &mut self,
-        _local: &str,
-        _remote: &str,
-        _resume_from: u64,
-        _on_progress: &dyn Fn(u64),
+        local: &str,
+        remote: &str,
+        resume_from: u64,
+        on_progress: &(dyn Fn(u64) + Send + Sync),
     ) -> Result<()> {
-        self.assert_connected()
+        let sftp = self.sftp_ref()?;
+        let mut local_file = tokio::fs::File::open(local).await?;
+        if resume_from > 0 {
+            use tokio::io::AsyncSeekExt;
+            local_file
+                .seek(std::io::SeekFrom::Start(resume_from))
+                .await?;
+        }
+        let mut remote_file = if resume_from > 0 {
+            let mut f = sftp.open_with_flags(
+                remote,
+                russh_sftp::protocol::OpenFlags::WRITE
+                    | russh_sftp::protocol::OpenFlags::CREATE,
+            )
+            .await
+            .map_err(map_sftp)?;
+            use tokio::io::AsyncSeekExt;
+            f.seek(std::io::SeekFrom::Start(resume_from)).await?;
+            f
+        } else {
+            sftp.create(remote).await.map_err(map_sftp)?
+        };
+
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut total = resume_from;
+        loop {
+            let n = local_file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            remote_file.write_all(&buf[..n]).await?;
+            total += n as u64;
+            on_progress(total);
+        }
+        remote_file.flush().await?;
+        Ok(())
     }
 
     async fn download(
         &mut self,
-        _remote: &str,
-        _local: &str,
-        _resume_from: u64,
-        _on_progress: &dyn Fn(u64),
+        remote: &str,
+        local: &str,
+        resume_from: u64,
+        on_progress: &(dyn Fn(u64) + Send + Sync),
     ) -> Result<()> {
-        self.assert_connected()
-    }
-}
-
-impl SftpProtocol {
-    fn assert_connected(&self) -> Result<()> {
-        if self.connected {
-            Ok(())
-        } else {
-            Err(YoinkError::NotConnected)
+        let sftp = self.sftp_ref()?;
+        let mut remote_file = sftp.open(remote).await.map_err(map_sftp)?;
+        if resume_from > 0 {
+            use tokio::io::AsyncSeekExt;
+            remote_file
+                .seek(std::io::SeekFrom::Start(resume_from))
+                .await?;
         }
+        let mut local_file = if resume_from > 0 {
+            tokio::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(local)
+                .await?
+        } else {
+            tokio::fs::File::create(local).await?
+        };
+        if resume_from > 0 {
+            use tokio::io::AsyncSeekExt;
+            local_file
+                .seek(std::io::SeekFrom::Start(resume_from))
+                .await?;
+        }
+
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut total = resume_from;
+        loop {
+            let n = remote_file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            local_file.write_all(&buf[..n]).await?;
+            total += n as u64;
+            on_progress(total);
+        }
+        local_file.sync_all().await?;
+        Ok(())
     }
 }

@@ -85,4 +85,16 @@ impl TransferQueue {
             t.bytes_done = bytes_done;
         }
     }
+
+    pub async fn fail(&self, id: &str, reason: String) {
+        let mut q = self.inner.lock().await;
+        if let Some(t) = q.iter_mut().find(|t| t.id == id) {
+            t.state = TransferState::Failed;
+            t.error = Some(reason);
+        }
+    }
+
+    pub async fn get(&self, id: &str) -> Option<Transfer> {
+        self.inner.lock().await.iter().find(|t| t.id == id).cloned()
+    }
 }

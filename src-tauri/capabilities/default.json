@@ -7,12 +7,19 @@
   ],
   "permissions": [
     "core:default",
+    "core:webview:allow-internal-toggle-devtools",
     "opener:default",
     "dialog:default",
     "fs:default",
+    "fs:allow-home-read-recursive",
+    "fs:allow-home-write-recursive",
+    "fs:allow-read-dir",
+    "fs:allow-stat",
     "shell:default",
+    "shell:allow-open",
     "os:default",
     "notification:default",
+    "notification:allow-notify",
     "store:default"
   ]
 }

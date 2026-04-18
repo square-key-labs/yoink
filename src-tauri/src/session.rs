@@ -60,4 +60,8 @@ impl SessionPool {
     pub async fn ids(&self) -> Vec<SessionId> {
         self.inner.lock().await.keys().cloned().collect()
     }
+
+    pub async fn get(&self, id: &str) -> Option<Arc<Mutex<Session>>> {
+        self.inner.lock().await.get(id).cloned()
+    }
 }

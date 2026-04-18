@@ -7,7 +7,9 @@ mod session;
 mod transfer;
 
 use session::SessionPool;
-use tauri::Manager;
+use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+use tauri::tray::TrayIconBuilder;
+use tauri::{Emitter, Manager};
 use transfer::TransferQueue;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -55,6 +57,72 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 apply_window_effects(&window);
             }
+
+            let new_conn = MenuItemBuilder::new("New Connection…")
+                .id("new_conn")
+                .accelerator("CmdOrCtrl+N")
+                .build(app)?;
+            let close_tab = MenuItemBuilder::new("Close Tab")
+                .id("close_tab")
+                .accelerator("CmdOrCtrl+W")
+                .build(app)?;
+            let prefs = MenuItemBuilder::new("Preferences…")
+                .id("prefs")
+                .accelerator("CmdOrCtrl+,")
+                .build(app)?;
+
+            let app_menu = SubmenuBuilder::new(app, "Yoink")
+                .about(None)
+                .separator()
+                .item(&prefs)
+                .separator()
+                .services()
+                .separator()
+                .hide()
+                .hide_others()
+                .show_all()
+                .separator()
+                .quit()
+                .build()?;
+            let file_menu = SubmenuBuilder::new(app, "File")
+                .item(&new_conn)
+                .item(&close_tab)
+                .build()?;
+            let edit_menu = SubmenuBuilder::new(app, "Edit")
+                .undo()
+                .redo()
+                .separator()
+                .cut()
+                .copy()
+                .paste()
+                .select_all()
+                .build()?;
+            let view_menu = SubmenuBuilder::new(app, "View")
+                .fullscreen()
+                .build()?;
+            let window_menu = SubmenuBuilder::new(app, "Window")
+                .minimize()
+                .maximize()
+                .separator()
+                .close_window()
+                .build()?;
+
+            let menu = MenuBuilder::new(app)
+                .items(&[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu])
+                .build()?;
+            app.set_menu(menu)?;
+
+            app.on_menu_event(|app, event| {
+                let _ = app.emit("yoink://menu", event.id().0.clone());
+            });
+
+            let _ = TrayIconBuilder::new()
+                .icon(app.default_window_icon().cloned().unwrap_or_else(|| {
+                    tauri::image::Image::new_owned(vec![], 0, 0)
+                }))
+                .tooltip("Yoink")
+                .build(app)?;
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

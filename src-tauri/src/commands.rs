@@ -2,8 +2,8 @@ use crate::bookmarks::{BookmarkStore, BookmarksFile, KeychainClient};
 use crate::error::Result;
 use crate::protocols::{ConnectionConfig, FileEntry};
 use crate::session::{SessionId, SessionPool};
-use crate::transfer::{Transfer, TransferDirection, TransferQueue};
-use tauri::State;
+use crate::transfer::{worker, Transfer, TransferDirection, TransferQueue};
+use tauri::{AppHandle, State};
 
 #[tauri::command]
 pub async fn connect(
@@ -56,6 +56,8 @@ pub async fn keychain_delete(bookmark_id: String, slot: String) -> Result<()> {
 
 #[tauri::command]
 pub async fn transfer_enqueue(
+    app: AppHandle,
+    pool: State<'_, SessionPool>,
     queue: State<'_, TransferQueue>,
     session_id: String,
     direction: TransferDirection,
@@ -63,9 +65,11 @@ pub async fn transfer_enqueue(
     remote_path: String,
     total_bytes: u64,
 ) -> Result<Transfer> {
-    Ok(queue
+    let t = queue
         .enqueue(session_id, direction, local_path, remote_path, total_bytes)
-        .await)
+        .await;
+    worker::spawn(app, (*pool).clone(), (*queue).clone(), t.clone());
+    Ok(t)
 }
 
 #[tauri::command]

@@ -94,13 +94,13 @@ pub trait Protocol: Send + Sync {
         local: &str,
         remote: &str,
         resume_from: u64,
-        on_progress: &dyn Fn(u64),
+        on_progress: &(dyn Fn(u64) + Send + Sync),
     ) -> Result<()>;
     async fn download(
         &mut self,
         remote: &str,
         local: &str,
         resume_from: u64,
-        on_progress: &dyn Fn(u64),
+        on_progress: &(dyn Fn(u64) + Send + Sync),
     ) -> Result<()>;
 }
