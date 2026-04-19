@@ -50,9 +50,10 @@ impl Protocol for FtpProtocol {
             ));
         }
         let mut stream = if let Some(proxy_cfg) = &config.proxy {
-            let tcp =
-                proxy::connect_via_proxy(proxy_cfg, &config.host, config.port).await?;
-            AsyncFtpStream::connect_with_stream(tcp).await.map_err(map_ftp)?
+            let tcp = proxy::connect_via_proxy(proxy_cfg, &config.host, config.port).await?;
+            AsyncFtpStream::connect_with_stream(tcp)
+                .await
+                .map_err(map_ftp)?
         } else {
             let addr = format!("{}:{}", config.host, config.port);
             AsyncFtpStream::connect(&addr).await.map_err(map_ftp)?

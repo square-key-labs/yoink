@@ -140,8 +140,7 @@ impl Protocol for SftpProtocol {
         ]);
         let cfg = Arc::new(cfg);
         let mut handle = if let Some(proxy_cfg) = &config.proxy {
-            let stream =
-                proxy::connect_via_proxy(proxy_cfg, &config.host, config.port).await?;
+            let stream = proxy::connect_via_proxy(proxy_cfg, &config.host, config.port).await?;
             client::connect_stream(cfg, stream, handler)
                 .await
                 .map_err(map_russh)?

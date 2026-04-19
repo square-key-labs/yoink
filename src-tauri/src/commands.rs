@@ -201,11 +201,7 @@ pub async fn remote_stat(
 /// the UI. Next `connect` call against the same host/port will pass the TOFU
 /// check instead of returning `UnknownHost`.
 #[tauri::command]
-pub async fn accept_host_fingerprint(
-    host: String,
-    port: u16,
-    fingerprint: String,
-) -> Result<()> {
+pub async fn accept_host_fingerprint(host: String, port: u16, fingerprint: String) -> Result<()> {
     let known = KnownHosts::new(KnownHosts::default_path()?)?;
     known.insert(&host, port, &fingerprint)?;
     Ok(())
