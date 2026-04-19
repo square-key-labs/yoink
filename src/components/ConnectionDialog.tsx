@@ -1,8 +1,9 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
-import { api, type Bookmark, type ProtocolKind } from "../lib/api";
+import { api, type Bookmark, type ConnectionConfig, type ProtocolKind } from "../lib/api";
 import { useBookmarks } from "../store/bookmarks";
+import { usePendingTofu } from "../store/pendingTofu";
 import { useSessions } from "../store/sessions";
 import { X } from "./icons";
 
@@ -94,19 +95,20 @@ export function ConnectionDialog({
   async function submit() {
     setBusy(true);
     setError(null);
+    let pw = password;
+    if (mode === "view" && selectedId) {
+      pw = (await api.keychainGetPassword(selectedId).catch(() => null)) ?? "";
+    }
+    const config: ConnectionConfig = {
+      kind,
+      host,
+      port,
+      username,
+      auth: { kind: "password", password: pw },
+      passive: kind !== "sftp",
+    };
     try {
-      let pw = password;
-      if (mode === "view" && selectedId) {
-        pw = (await api.keychainGetPassword(selectedId).catch(() => null)) ?? "";
-      }
-      const sid = await api.connect({
-        kind,
-        host,
-        port,
-        username,
-        auth: { kind: "password", password: pw },
-        passive: kind !== "sftp",
-      });
+      const sid = await api.connect(config);
       addTab({
         id: crypto.randomUUID(),
         sessionId: sid,
@@ -136,7 +138,19 @@ export function ConnectionDialog({
       onOpenChange(false);
       setPassword("");
     } catch (e: any) {
-      setError(typeof e === "string" ? e : e?.message ?? String(e));
+      const msg = typeof e === "string" ? e : e?.message ?? String(e);
+      const tofu = parseUnknownHost(msg, e);
+      if (tofu) {
+        usePendingTofu.getState().setPending({
+          host: tofu.host ?? host,
+          port: tofu.port ?? port,
+          fingerprint: tofu.fingerprint,
+          config,
+        });
+        onOpenChange(false);
+      } else {
+        setError(msg);
+      }
     } finally {
       setBusy(false);
     }
@@ -492,4 +506,78 @@ function EditForm(p: {
       </div>
     </div>
   );
+}
+
+interface UnknownHostInfo {
+  host?: string;
+  port?: number;
+  fingerprint: string;
+}
+
+function parseUnknownHost(msg: string, raw: unknown): UnknownHostInfo | null {
+  // Preferred: structured payload on the error object.
+  if (raw && typeof raw === "object") {
+    const r = raw as Record<string, unknown>;
+    const code =
+      typeof r.code === "string"
+        ? r.code.toLowerCase()
+        : typeof r.kind === "string"
+          ? (r.kind as string).toLowerCase()
+          : "";
+    const fp =
+      typeof r.fingerprint === "string"
+        ? r.fingerprint
+        : typeof r.sha256 === "string"
+          ? r.sha256
+          : "";
+    if (fp && (code.includes("unknown") || code.includes("tofu") || code.includes("fingerprint"))) {
+      return {
+        host: typeof r.host === "string" ? r.host : undefined,
+        port: typeof r.port === "number" ? r.port : undefined,
+        fingerprint: fp,
+      };
+    }
+  }
+
+  // Fallback: parse the shape `"unknown host — fingerprint confirmation required"`
+  // optionally followed by a JSON payload or `fingerprint=...`.
+  if (!msg) return null;
+  if (!/unknown host/i.test(msg)) return null;
+
+  // Try embedded JSON first.
+  const jsonMatch = msg.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const obj = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+      const fp =
+        typeof obj.fingerprint === "string"
+          ? obj.fingerprint
+          : typeof obj.sha256 === "string"
+            ? obj.sha256
+            : "";
+      if (fp) {
+        return {
+          host: typeof obj.host === "string" ? obj.host : undefined,
+          port: typeof obj.port === "number" ? obj.port : undefined,
+          fingerprint: fp,
+        };
+      }
+    } catch {
+      // fall through
+    }
+  }
+
+  // Try `fingerprint=SHA256:...` or bare SHA256:base64.
+  const kvMatch = msg.match(/fingerprint\s*[:=]\s*([A-Za-z0-9+/:._=-]+)/i);
+  if (kvMatch) {
+    return { fingerprint: kvMatch[1] };
+  }
+  const shaMatch = msg.match(/SHA256:[A-Za-z0-9+/=]+/);
+  if (shaMatch) {
+    return { fingerprint: shaMatch[0] };
+  }
+
+  // UnknownHost detected but no fingerprint embedded — trigger dialog with empty
+  // fingerprint as a last resort so the user still sees the prompt.
+  return { fingerprint: "" };
 }

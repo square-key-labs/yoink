@@ -1,5 +1,6 @@
 use crate::bookmarks::{BookmarkStore, BookmarksFile, KeychainClient};
 use crate::error::Result;
+use crate::knownhosts::KnownHosts;
 use crate::protocols::{ConnectionConfig, FileEntry};
 use crate::session::{SessionId, SessionPool};
 use crate::transfer::{worker, Transfer, TransferDirection, TransferQueue, TransferState};
@@ -194,6 +195,20 @@ pub async fn remote_stat(
         Ok(entry) => Ok(Some(entry)),
         Err(_) => Ok(None),
     }
+}
+
+/// Persist an unknown SSH host fingerprint after the user has confirmed it in
+/// the UI. Next `connect` call against the same host/port will pass the TOFU
+/// check instead of returning `UnknownHost`.
+#[tauri::command]
+pub async fn accept_host_fingerprint(
+    host: String,
+    port: u16,
+    fingerprint: String,
+) -> Result<()> {
+    let known = KnownHosts::new(KnownHosts::default_path()?)?;
+    known.insert(&host, port, &fingerprint)?;
+    Ok(())
 }
 
 #[tauri::command]

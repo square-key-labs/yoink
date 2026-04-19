@@ -127,6 +127,14 @@ export function usePaneShortcuts(opts: PaneShortcutsOptions) {
         return;
       }
 
+      // ⌘J → toggle transfer history panel
+      if (mod && e.key.toLowerCase() === "j") {
+        if (editable) return;
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent("yoink:toggle-transfer-history"));
+        return;
+      }
+
       // Delete / Backspace → delete selection
       if (e.key === "Delete" || e.key === "Backspace") {
         if (editable) return;

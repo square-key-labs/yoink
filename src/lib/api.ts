@@ -7,6 +7,16 @@ export type Auth =
   | { kind: "key"; private_key: string; passphrase?: string }
   | { kind: "agent" };
 
+export type ProxyKind = "socks5" | "http";
+
+export interface ProxyConfig {
+  kind: ProxyKind;
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+}
+
 export interface ConnectionConfig {
   kind: ProtocolKind;
   host: string;
@@ -15,6 +25,20 @@ export interface ConnectionConfig {
   auth: Auth;
   passive?: boolean;
   verify_host?: boolean;
+  proxy?: ProxyConfig | null;
+}
+
+/**
+ * Shape of the error payload thrown when `connect` hits an unknown host
+ * fingerprint (TOFU). Call `api.acceptHostFingerprint` with these values once
+ * the user confirms, then retry `connect`.
+ */
+export interface UnknownHostError {
+  kind: "unknown_host";
+  message: string;
+  host: string;
+  port: number;
+  fingerprint: string;
 }
 
 export type EntryKind = "file" | "dir" | "symlink" | "other";
@@ -117,4 +141,6 @@ export const api = {
   transferRetry: (id: string) =>
     invoke<void>("transfer_retry", { id }),
   getTheme: () => invoke<"dark" | "light" | "system">("get_theme"),
+  acceptHostFingerprint: (host: string, port: number, fingerprint: string) =>
+    invoke<void>("accept_host_fingerprint", { host, port, fingerprint }),
 };

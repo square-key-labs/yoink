@@ -96,3 +96,22 @@ export const Play = (p: IconProps) => (
     <path d="M6 4v16l14-8L6 4Z" />
   </svg>
 );
+
+export const ArrowUpDown = (p: IconProps) => (
+  <svg {...base} {...p}>
+    <path d="M7 3v14M3 7l4-4 4 4" />
+    <path d="M17 21V7M13 17l4 4 4-4" />
+  </svg>
+);
+
+export const ChevronUp = (p: IconProps) => (
+  <svg {...base} {...p}>
+    <path d="m6 15 6-6 6 6" />
+  </svg>
+);
+
+export const ChevronDown = (p: IconProps) => (
+  <svg {...base} {...p}>
+    <path d="m6 9 6 6 6-6" />
+  </svg>
+);

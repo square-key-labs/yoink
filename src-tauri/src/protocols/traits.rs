@@ -49,6 +49,24 @@ impl Drop for Auth {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyKind {
+    Socks5,
+    Http,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyConfig {
+    pub kind: ProxyKind,
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionConfig {
     pub kind: ProtocolKind,
@@ -60,6 +78,8 @@ pub struct ConnectionConfig {
     pub passive: bool,
     #[serde(default)]
     pub verify_host: bool,
+    #[serde(default)]
+    pub proxy: Option<ProxyConfig>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

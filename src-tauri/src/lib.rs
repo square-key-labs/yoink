@@ -3,6 +3,7 @@ mod commands;
 mod error;
 mod knownhosts;
 mod protocols;
+mod proxy;
 mod session;
 mod transfer;
 
@@ -53,7 +54,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(SessionPool::new())
-        .manage(TransferQueue::new())
+        .manage(TransferQueue::load_on_start())
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 apply_window_effects(&window);
@@ -146,6 +147,7 @@ pub fn run() {
             commands::transfer_cancel,
             commands::transfer_retry,
             commands::remote_stat,
+            commands::accept_host_fingerprint,
             commands::get_theme,
         ])
         .run(tauri::generate_context!())

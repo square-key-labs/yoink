@@ -1,9 +1,11 @@
 use crate::error::{Result, YoinkError};
 use crate::knownhosts::KnownHosts;
 use crate::protocols::traits::{Auth, ConnectionConfig, EntryKind, FileEntry, Protocol};
+use crate::proxy;
 use crate::transfer::TransferControl;
 use async_trait::async_trait;
 use russh::client::{self, Handle, Msg};
+use russh::keys::agent::AgentIdentity;
 use russh::keys::ssh_key::PrivateKey;
 use russh::keys::{Algorithm, EcdsaCurve};
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey};
@@ -137,9 +139,17 @@ impl Protocol for SftpProtocol {
             },
         ]);
         let cfg = Arc::new(cfg);
-        let mut handle = client::connect(cfg, (config.host.as_str(), config.port), handler)
-            .await
-            .map_err(map_russh)?;
+        let mut handle = if let Some(proxy_cfg) = &config.proxy {
+            let stream =
+                proxy::connect_via_proxy(proxy_cfg, &config.host, config.port).await?;
+            client::connect_stream(cfg, stream, handler)
+                .await
+                .map_err(map_russh)?
+        } else {
+            client::connect(cfg, (config.host.as_str(), config.port), handler)
+                .await
+                .map_err(map_russh)?
+        };
 
         if let Some(o) = outcome.lock().await.clone() {
             match o {
@@ -148,11 +158,14 @@ impl Protocol for SftpProtocol {
                     return Err(YoinkError::HostKeyMismatch);
                 }
                 HostKeyOutcome::Unknown { fingerprint } => {
-                    if config.verify_host {
-                        return Err(YoinkError::UnknownHost { fingerprint });
-                    }
-                    let known = KnownHosts::new(KnownHosts::default_path()?)?;
-                    known.insert(&config.host, config.port, &fingerprint)?;
+                    // TOFU: never auto-insert. Always require user confirmation
+                    // via `accept_host_fingerprint` command, regardless of
+                    // `verify_host`.
+                    return Err(YoinkError::UnknownHost {
+                        fingerprint,
+                        host: config.host.clone(),
+                        port: config.port,
+                    });
                 }
             }
         }
@@ -183,9 +196,44 @@ impl Protocol for SftpProtocol {
                     .success()
             }
             Auth::Agent => {
-                return Err(YoinkError::Other(
-                    "SSH agent auth not yet implemented — use password or key".into(),
-                ));
+                let mut agent = russh::keys::agent::client::AgentClient::connect_env()
+                    .await
+                    .map_err(|e| YoinkError::Protocol(format!("ssh-agent: {e}")))?;
+                let identities = agent
+                    .request_identities()
+                    .await
+                    .map_err(|e| YoinkError::Protocol(format!("ssh-agent: {e}")))?;
+                if identities.is_empty() {
+                    return Err(YoinkError::Other(
+                        "ssh-agent has no identities loaded".into(),
+                    ));
+                }
+                let mut ok = false;
+                for id in identities {
+                    let public_key = match id {
+                        AgentIdentity::PublicKey { key, .. } => key,
+                        // Certificate-backed identities are skipped; we would
+                        // need authenticate_certificate_with for those.
+                        AgentIdentity::Certificate { .. } => continue,
+                    };
+                    match handle
+                        .authenticate_publickey_with(
+                            &config.username,
+                            public_key,
+                            Some(HashAlg::Sha256),
+                            &mut agent,
+                        )
+                        .await
+                    {
+                        Ok(res) if res.success() => {
+                            ok = true;
+                            break;
+                        }
+                        Ok(_) => continue,
+                        Err(_) => continue,
+                    }
+                }
+                ok
             }
         };
         if !auth_ok {

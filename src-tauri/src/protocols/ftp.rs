@@ -1,5 +1,6 @@
 use crate::error::{Result, YoinkError};
 use crate::protocols::traits::{Auth, ConnectionConfig, EntryKind, FileEntry, Protocol};
+use crate::proxy;
 use crate::transfer::TransferControl;
 use async_trait::async_trait;
 use std::str::FromStr;
@@ -48,8 +49,14 @@ impl Protocol for FtpProtocol {
                     .into(),
             ));
         }
-        let addr = format!("{}:{}", config.host, config.port);
-        let mut stream = AsyncFtpStream::connect(&addr).await.map_err(map_ftp)?;
+        let mut stream = if let Some(proxy_cfg) = &config.proxy {
+            let tcp =
+                proxy::connect_via_proxy(proxy_cfg, &config.host, config.port).await?;
+            AsyncFtpStream::connect_with_stream(tcp).await.map_err(map_ftp)?
+        } else {
+            let addr = format!("{}:{}", config.host, config.port);
+            AsyncFtpStream::connect(&addr).await.map_err(map_ftp)?
+        };
         let password = match &config.auth {
             Auth::Password { password } => password.clone(),
             Auth::Key { .. } | Auth::Agent => {
