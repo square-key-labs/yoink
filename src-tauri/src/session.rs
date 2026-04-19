@@ -1,7 +1,7 @@
 use crate::error::Result;
-use crate::protocols::{ConnectionConfig, FileEntry, Protocol, ProtocolKind};
 use crate::protocols::ftp::FtpProtocol;
 use crate::protocols::sftp::SftpProtocol;
+use crate::protocols::{ConnectionConfig, FileEntry, Protocol, ProtocolKind};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -33,8 +33,15 @@ impl SessionPool {
             ProtocolKind::Ftps => Box::new(FtpProtocol::new(true)),
         };
         protocol.connect(&config).await?;
-        let session = Session { id: id.clone(), config, protocol };
-        self.inner.lock().await.insert(id.clone(), Arc::new(Mutex::new(session)));
+        let session = Session {
+            id: id.clone(),
+            config,
+            protocol,
+        };
+        self.inner
+            .lock()
+            .await
+            .insert(id.clone(), Arc::new(Mutex::new(session)));
         Ok(id)
     }
 

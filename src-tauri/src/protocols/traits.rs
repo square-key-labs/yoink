@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::transfer::TransferControl;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
@@ -14,8 +15,13 @@ pub enum ProtocolKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Auth {
-    Password { password: String },
-    Key { private_key: String, passphrase: Option<String> },
+    Password {
+        password: String,
+    },
+    Key {
+        private_key: String,
+        passphrase: Option<String>,
+    },
     Agent,
 }
 
@@ -23,7 +29,10 @@ impl Zeroize for Auth {
     fn zeroize(&mut self) {
         match self {
             Auth::Password { password } => password.zeroize(),
-            Auth::Key { private_key, passphrase } => {
+            Auth::Key {
+                private_key,
+                passphrase,
+            } => {
                 private_key.zeroize();
                 if let Some(p) = passphrase {
                     p.zeroize();
@@ -95,6 +104,7 @@ pub trait Protocol: Send + Sync {
         remote: &str,
         resume_from: u64,
         on_progress: &(dyn Fn(u64) + Send + Sync),
+        control: &(dyn TransferControl + Send + Sync),
     ) -> Result<()>;
     async fn download(
         &mut self,
@@ -102,5 +112,6 @@ pub trait Protocol: Send + Sync {
         local: &str,
         resume_from: u64,
         on_progress: &(dyn Fn(u64) + Send + Sync),
+        control: &(dyn TransferControl + Send + Sync),
     ) -> Result<()>;
 }

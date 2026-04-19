@@ -9,8 +9,7 @@ pub struct KnownHosts {
 
 impl KnownHosts {
     pub fn default_path() -> Result<PathBuf> {
-        let mut p = dirs::data_dir()
-            .ok_or_else(|| YoinkError::Other("no data dir".into()))?;
+        let mut p = dirs::data_dir().ok_or_else(|| YoinkError::Other("no data dir".into()))?;
         p.push("Yoink");
         p.push("known_hosts");
         Ok(p)

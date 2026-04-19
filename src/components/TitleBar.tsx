@@ -1,16 +1,30 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useFullscreen } from "../hooks/useFullscreen";
 import { Plus } from "./icons";
 
+function onDrag(e: React.MouseEvent) {
+  if (e.buttons !== 1 || e.detail === 2) return;
+  getCurrentWindow().startDragging().catch(() => {});
+}
+
 export function TitleBar({ onConnect }: { onConnect: () => void }) {
+  const fullscreen = useFullscreen();
   return (
     <div
-      data-tauri-drag-region
-      className="flex h-11 shrink-0 items-center gap-2 pl-20 pr-3 border-b border-black/10 dark:border-white/10 bg-white/40 dark:bg-neutral-900/40 backdrop-blur-md"
+      onMouseDown={onDrag}
+      className={
+        "flex h-11 shrink-0 items-center gap-2 pr-3 border-b border-hairline surface-1 transition-[padding] " +
+        (fullscreen ? "pl-4" : "pl-24")
+      }
     >
-      <span className="text-sm font-medium tracking-tight">Yoink</span>
-      <div className="flex-1" data-tauri-drag-region />
+      <span className="text-sm font-medium tracking-tight pointer-events-none">
+        Yoink
+      </span>
+      <div className="flex-1" onMouseDown={onDrag} />
       <button
         onClick={onConnect}
-        className="flex items-center gap-1 rounded-md bg-black/80 dark:bg-white text-white dark:text-black px-2.5 py-1 text-xs font-medium hover:opacity-90"
+        onMouseDown={(e) => e.stopPropagation()}
+        className="accent-button flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium"
       >
         <Plus className="h-3.5 w-3.5" />
         Connect

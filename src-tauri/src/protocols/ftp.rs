@@ -1,5 +1,6 @@
 use crate::error::{Result, YoinkError};
 use crate::protocols::traits::{Auth, ConnectionConfig, EntryKind, FileEntry, Protocol};
+use crate::transfer::TransferControl;
 use async_trait::async_trait;
 use std::str::FromStr;
 use suppaftp::list::File as FtpListFile;
@@ -52,9 +53,7 @@ impl Protocol for FtpProtocol {
         let password = match &config.auth {
             Auth::Password { password } => password.clone(),
             Auth::Key { .. } | Auth::Agent => {
-                return Err(YoinkError::Other(
-                    "FTP only supports password auth".into(),
-                ))
+                return Err(YoinkError::Other("FTP only supports password auth".into()))
             }
         };
         stream
@@ -159,6 +158,7 @@ impl Protocol for FtpProtocol {
         remote: &str,
         resume_from: u64,
         on_progress: &(dyn Fn(u64) + Send + Sync),
+        control: &(dyn TransferControl + Send + Sync),
     ) -> Result<()> {
         let stream = self.stream_mut()?;
         let mut local_file = tokio::fs::File::open(local).await?;
@@ -167,27 +167,43 @@ impl Protocol for FtpProtocol {
             local_file
                 .seek(std::io::SeekFrom::Start(resume_from))
                 .await?;
-            stream.resume_transfer(resume_from as usize).await.map_err(map_ftp)?;
+            stream
+                .resume_transfer(resume_from as usize)
+                .await
+                .map_err(map_ftp)?;
         }
         let mut data = if resume_from > 0 {
             stream.append_with_stream(remote).await.map_err(map_ftp)?
         } else {
             stream.put_with_stream(remote).await.map_err(map_ftp)?
         };
-        let mut buf = vec![0u8; 64 * 1024];
+        let mut buf = vec![0u8; 1024 * 1024];
         let mut total = resume_from;
-        loop {
-            let n = local_file.read(&mut buf).await?;
-            if n == 0 {
-                break;
+        let outcome: Result<()> = loop {
+            if control.should_cancel() {
+                break Err(YoinkError::Cancelled);
             }
-            data.write_all(&buf[..n]).await?;
+            if control.should_pause() {
+                let _ = data.flush().await;
+                break Err(YoinkError::Paused);
+            }
+            let n = match local_file.read(&mut buf).await {
+                Ok(n) => n,
+                Err(e) => break Err(e.into()),
+            };
+            if n == 0 {
+                break Ok(());
+            }
+            if let Err(e) = data.write_all(&buf[..n]).await {
+                break Err(e.into());
+            }
             total += n as u64;
             on_progress(total);
-        }
-        data.flush().await?;
+        };
+        // Always finalize the control-data stream to keep the session usable.
+        let _ = data.flush().await;
         stream.finalize_put_stream(data).await.map_err(map_ftp)?;
-        Ok(())
+        outcome
     }
 
     async fn download(
@@ -196,6 +212,7 @@ impl Protocol for FtpProtocol {
         local: &str,
         resume_from: u64,
         on_progress: &(dyn Fn(u64) + Send + Sync),
+        control: &(dyn TransferControl + Send + Sync),
     ) -> Result<()> {
         let stream = self.stream_mut()?;
         if resume_from > 0 {
@@ -220,19 +237,31 @@ impl Protocol for FtpProtocol {
                 .seek(std::io::SeekFrom::Start(resume_from))
                 .await?;
         }
-        let mut buf = vec![0u8; 64 * 1024];
+        let mut buf = vec![0u8; 1024 * 1024];
         let mut total = resume_from;
-        loop {
-            let n = data.read(&mut buf).await?;
-            if n == 0 {
-                break;
+        let outcome: Result<()> = loop {
+            if control.should_cancel() {
+                break Err(YoinkError::Cancelled);
             }
-            local_file.write_all(&buf[..n]).await?;
+            if control.should_pause() {
+                let _ = local_file.sync_all().await;
+                break Err(YoinkError::Paused);
+            }
+            let n = match data.read(&mut buf).await {
+                Ok(n) => n,
+                Err(e) => break Err(e.into()),
+            };
+            if n == 0 {
+                break Ok(());
+            }
+            if let Err(e) = local_file.write_all(&buf[..n]).await {
+                break Err(e.into());
+            }
             total += n as u64;
             on_progress(total);
-        }
-        local_file.sync_all().await?;
+        };
+        let _ = local_file.sync_all().await;
         stream.finalize_retr_stream(data).await.map_err(map_ftp)?;
-        Ok(())
+        outcome
     }
 }

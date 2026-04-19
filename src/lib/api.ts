@@ -49,6 +49,27 @@ export interface Transfer {
   error: string | null;
 }
 
+export type AuthRef =
+  | { kind: "password" }
+  | { kind: "key"; private_key_ref: string; has_passphrase: boolean }
+  | { kind: "agent" };
+
+export interface Bookmark {
+  id: string;
+  label: string;
+  kind: ProtocolKind;
+  host: string;
+  port: number;
+  username: string;
+  auth_ref: AuthRef;
+  initial_path?: string | null;
+}
+
+export interface BookmarksFile {
+  version: number;
+  bookmarks: Bookmark[];
+}
+
 export const api = {
   connect: (config: ConnectionConfig) =>
     invoke<string>("connect", { config }),
@@ -57,10 +78,19 @@ export const api = {
   listDir: (sessionId: string, path: string) =>
     invoke<FileEntry[]>("list_dir", { sessionId, path }),
   listSessions: () => invoke<string[]>("list_sessions"),
-  bookmarksLoad: () => invoke<unknown>("bookmarks_load"),
-  bookmarksSave: (file: unknown) => invoke<void>("bookmarks_save", { file }),
+  remoteRename: (sessionId: string, from: string, to: string) =>
+    invoke<void>("remote_rename", { sessionId, from, to }),
+  remoteRemove: (sessionId: string, path: string) =>
+    invoke<void>("remote_remove", { sessionId, path }),
+  remoteMkdir: (sessionId: string, path: string) =>
+    invoke<void>("remote_mkdir", { sessionId, path }),
+  bookmarksLoad: () => invoke<BookmarksFile>("bookmarks_load"),
+  bookmarksSave: (file: BookmarksFile) =>
+    invoke<void>("bookmarks_save", { file }),
   keychainSetPassword: (bookmarkId: string, password: string) =>
     invoke<void>("keychain_set_password", { bookmarkId, password }),
+  keychainGetPassword: (bookmarkId: string) =>
+    invoke<string | null>("keychain_get_password", { bookmarkId }),
   keychainDelete: (bookmarkId: string, slot: string) =>
     invoke<void>("keychain_delete", { bookmarkId, slot }),
   transferEnqueue: (
@@ -78,5 +108,13 @@ export const api = {
       totalBytes,
     }),
   transferList: () => invoke<Transfer[]>("transfer_list"),
+  transferPause: (id: string) =>
+    invoke<void>("transfer_pause", { id }),
+  transferResume: (id: string) =>
+    invoke<void>("transfer_resume", { id }),
+  transferCancel: (id: string) =>
+    invoke<void>("transfer_cancel", { id }),
+  transferRetry: (id: string) =>
+    invoke<void>("transfer_retry", { id }),
   getTheme: () => invoke<"dark" | "light" | "system">("get_theme"),
 };

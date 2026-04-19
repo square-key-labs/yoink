@@ -21,6 +21,8 @@ pub enum YoinkError {
     Keychain(String),
     #[error("cancelled")]
     Cancelled,
+    #[error("paused")]
+    Paused,
     #[error("{0}")]
     Other(String),
 }

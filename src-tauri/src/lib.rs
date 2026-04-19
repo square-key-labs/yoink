@@ -19,8 +19,8 @@ fn apply_window_effects(window: &tauri::WebviewWindow) {
         use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
         let _ = apply_vibrancy(
             window,
-            NSVisualEffectMaterial::HudWindow,
-            Some(NSVisualEffectState::Active),
+            NSVisualEffectMaterial::Sidebar,
+            Some(NSVisualEffectState::FollowsWindowActiveState),
             None,
         );
     }
@@ -44,6 +44,7 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_os::init())
@@ -97,9 +98,7 @@ pub fn run() {
                 .paste()
                 .select_all()
                 .build()?;
-            let view_menu = SubmenuBuilder::new(app, "View")
-                .fullscreen()
-                .build()?;
+            let view_menu = SubmenuBuilder::new(app, "View").fullscreen().build()?;
             let window_menu = SubmenuBuilder::new(app, "Window")
                 .minimize()
                 .maximize()
@@ -117,9 +116,11 @@ pub fn run() {
             });
 
             let _ = TrayIconBuilder::new()
-                .icon(app.default_window_icon().cloned().unwrap_or_else(|| {
-                    tauri::image::Image::new_owned(vec![], 0, 0)
-                }))
+                .icon(
+                    app.default_window_icon()
+                        .cloned()
+                        .unwrap_or_else(|| tauri::image::Image::new_owned(vec![], 0, 0)),
+                )
                 .tooltip("Yoink")
                 .build(app)?;
 
@@ -130,12 +131,21 @@ pub fn run() {
             commands::disconnect,
             commands::list_dir,
             commands::list_sessions,
+            commands::remote_rename,
+            commands::remote_remove,
+            commands::remote_mkdir,
             commands::bookmarks_load,
             commands::bookmarks_save,
             commands::keychain_set_password,
+            commands::keychain_get_password,
             commands::keychain_delete,
             commands::transfer_enqueue,
             commands::transfer_list,
+            commands::transfer_pause,
+            commands::transfer_resume,
+            commands::transfer_cancel,
+            commands::transfer_retry,
+            commands::remote_stat,
             commands::get_theme,
         ])
         .run(tauri::generate_context!())

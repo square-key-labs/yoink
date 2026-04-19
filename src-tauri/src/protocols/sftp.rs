@@ -1,12 +1,15 @@
 use crate::error::{Result, YoinkError};
 use crate::knownhosts::KnownHosts;
 use crate::protocols::traits::{Auth, ConnectionConfig, EntryKind, FileEntry, Protocol};
+use crate::transfer::TransferControl;
 use async_trait::async_trait;
 use russh::client::{self, Handle, Msg};
 use russh::keys::ssh_key::PrivateKey;
+use russh::keys::{Algorithm, EcdsaCurve};
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey};
-use russh::Channel;
+use russh::{kex, Channel, Preferred};
 use russh_sftp::client::SftpSession;
+use std::borrow::Cow;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
@@ -32,9 +35,7 @@ impl client::Handler for ServerKeyCheck {
         &mut self,
         server_public_key: &PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
-        let fp = server_public_key
-            .fingerprint(HashAlg::Sha256)
-            .to_string();
+        let fp = server_public_key.fingerprint(HashAlg::Sha256).to_string();
         let stored = self.known.lookup(&self.host, self.port).ok().flatten();
         let outcome = match stored {
             Some(s) if s == fp => HostKeyOutcome::Accepted,
@@ -42,7 +43,9 @@ impl client::Handler for ServerKeyCheck {
             None => HostKeyOutcome::Unknown { fingerprint: fp },
         };
         *self.outcome.lock().await = Some(outcome.clone());
-        Ok(matches!(outcome, HostKeyOutcome::Accepted))
+        // Accept unknown keys in-line; outer layer persists to known_hosts.
+        // Only reject on mismatch.
+        Ok(!matches!(outcome, HostKeyOutcome::Mismatch))
     }
 }
 
@@ -60,9 +63,7 @@ impl SftpProtocol {
     }
 
     fn sftp_ref(&mut self) -> Result<&mut SftpSession> {
-        self.sftp
-            .as_mut()
-            .ok_or(YoinkError::NotConnected)
+        self.sftp.as_mut().ok_or(YoinkError::NotConnected)
     }
 }
 
@@ -100,7 +101,42 @@ impl Protocol for SftpProtocol {
             known,
             outcome: outcome.clone(),
         };
-        let cfg = Arc::new(client::Config::default());
+        let mut cfg = client::Config::default();
+        // Larger window + packet size → higher SFTP throughput on fast links.
+        cfg.window_size = 8 * 1024 * 1024; // 8 MiB
+        cfg.maximum_packet_size = 256 * 1024; // 256 KiB
+        let defaults: Vec<kex::Name> = Preferred::DEFAULT.kex.iter().cloned().collect();
+        let mut kex_list: Vec<kex::Name> = vec![
+            kex::ECDH_SHA2_NISTP256,
+            kex::ECDH_SHA2_NISTP384,
+            kex::ECDH_SHA2_NISTP521,
+        ];
+        for k in defaults {
+            if !kex_list.contains(&k) {
+                kex_list.push(k);
+            }
+        }
+        cfg.preferred.kex = Cow::Owned(kex_list);
+        cfg.preferred.key = Cow::Owned(vec![
+            Algorithm::Ed25519,
+            Algorithm::Rsa {
+                hash: Some(russh::keys::HashAlg::Sha512),
+            },
+            Algorithm::Rsa {
+                hash: Some(russh::keys::HashAlg::Sha256),
+            },
+            Algorithm::Rsa { hash: None },
+            Algorithm::Ecdsa {
+                curve: EcdsaCurve::NistP256,
+            },
+            Algorithm::Ecdsa {
+                curve: EcdsaCurve::NistP384,
+            },
+            Algorithm::Ecdsa {
+                curve: EcdsaCurve::NistP521,
+            },
+        ]);
+        let cfg = Arc::new(cfg);
         let mut handle = client::connect(cfg, (config.host.as_str(), config.port), handler)
             .await
             .map_err(map_russh)?;
@@ -127,14 +163,15 @@ impl Protocol for SftpProtocol {
                 .await
                 .map_err(map_russh)?
                 .success(),
-            Auth::Key { private_key, passphrase } => {
-                let key = PrivateKey::from_openssh(private_key).map_err(|e| {
-                    YoinkError::Protocol(format!("key parse: {e}"))
-                })?;
+            Auth::Key {
+                private_key,
+                passphrase,
+            } => {
+                let key = PrivateKey::from_openssh(private_key)
+                    .map_err(|e| YoinkError::Protocol(format!("key parse: {e}")))?;
                 let key = if let Some(pass) = passphrase.as_deref().filter(|p| !p.is_empty()) {
-                    key.decrypt(pass).map_err(|e| {
-                        YoinkError::Protocol(format!("key decrypt: {e}"))
-                    })?
+                    key.decrypt(pass)
+                        .map_err(|e| YoinkError::Protocol(format!("key decrypt: {e}")))?
                 } else {
                     key
                 };
@@ -155,10 +192,7 @@ impl Protocol for SftpProtocol {
             return Err(YoinkError::Auth);
         }
 
-        let channel: Channel<Msg> = handle
-            .channel_open_session()
-            .await
-            .map_err(map_russh)?;
+        let channel: Channel<Msg> = handle.channel_open_session().await.map_err(map_russh)?;
         channel
             .request_subsystem(true, "sftp")
             .await
@@ -175,7 +209,9 @@ impl Protocol for SftpProtocol {
     async fn disconnect(&mut self) -> Result<()> {
         self.sftp = None;
         if let Some(h) = self.handle.take() {
-            let _ = h.disconnect(russh::Disconnect::ByApplication, "bye", "").await;
+            let _ = h
+                .disconnect(russh::Disconnect::ByApplication, "bye", "")
+                .await;
         }
         Ok(())
     }
@@ -258,6 +294,7 @@ impl Protocol for SftpProtocol {
         remote: &str,
         resume_from: u64,
         on_progress: &(dyn Fn(u64) + Send + Sync),
+        control: &(dyn TransferControl + Send + Sync),
     ) -> Result<()> {
         let sftp = self.sftp_ref()?;
         let mut local_file = tokio::fs::File::open(local).await?;
@@ -268,13 +305,14 @@ impl Protocol for SftpProtocol {
                 .await?;
         }
         let mut remote_file = if resume_from > 0 {
-            let mut f = sftp.open_with_flags(
-                remote,
-                russh_sftp::protocol::OpenFlags::WRITE
-                    | russh_sftp::protocol::OpenFlags::CREATE,
-            )
-            .await
-            .map_err(map_sftp)?;
+            let mut f = sftp
+                .open_with_flags(
+                    remote,
+                    russh_sftp::protocol::OpenFlags::WRITE
+                        | russh_sftp::protocol::OpenFlags::CREATE,
+                )
+                .await
+                .map_err(map_sftp)?;
             use tokio::io::AsyncSeekExt;
             f.seek(std::io::SeekFrom::Start(resume_from)).await?;
             f
@@ -282,9 +320,16 @@ impl Protocol for SftpProtocol {
             sftp.create(remote).await.map_err(map_sftp)?
         };
 
-        let mut buf = vec![0u8; 64 * 1024];
+        let mut buf = vec![0u8; 1024 * 1024];
         let mut total = resume_from;
         loop {
+            if control.should_cancel() {
+                return Err(YoinkError::Cancelled);
+            }
+            if control.should_pause() {
+                remote_file.flush().await?;
+                return Err(YoinkError::Paused);
+            }
             let n = local_file.read(&mut buf).await?;
             if n == 0 {
                 break;
@@ -303,6 +348,7 @@ impl Protocol for SftpProtocol {
         local: &str,
         resume_from: u64,
         on_progress: &(dyn Fn(u64) + Send + Sync),
+        control: &(dyn TransferControl + Send + Sync),
     ) -> Result<()> {
         let sftp = self.sftp_ref()?;
         let mut remote_file = sftp.open(remote).await.map_err(map_sftp)?;
@@ -328,9 +374,16 @@ impl Protocol for SftpProtocol {
                 .await?;
         }
 
-        let mut buf = vec![0u8; 64 * 1024];
+        let mut buf = vec![0u8; 1024 * 1024];
         let mut total = resume_from;
         loop {
+            if control.should_cancel() {
+                return Err(YoinkError::Cancelled);
+            }
+            if control.should_pause() {
+                local_file.sync_all().await?;
+                return Err(YoinkError::Paused);
+            }
             let n = remote_file.read(&mut buf).await?;
             if n == 0 {
                 break;

@@ -11,7 +11,10 @@ const SERVICE: &str = "com.squarekeylabs.yoink";
 #[serde(rename_all = "lowercase", tag = "kind")]
 pub enum AuthRef {
     Password,
-    Key { private_key_ref: String, has_passphrase: bool },
+    Key {
+        private_key_ref: String,
+        has_passphrase: bool,
+    },
     Agent,
 }
 
@@ -40,8 +43,7 @@ pub struct BookmarkStore {
 
 impl BookmarkStore {
     pub fn default_path() -> Result<PathBuf> {
-        let mut p = dirs::data_dir()
-            .ok_or_else(|| YoinkError::Other("no data dir".into()))?;
+        let mut p = dirs::data_dir().ok_or_else(|| YoinkError::Other("no data dir".into()))?;
         p.push("Yoink");
         p.push("bookmarks.json");
         Ok(p)
@@ -56,7 +58,10 @@ impl BookmarkStore {
 
     pub fn load(&self) -> Result<BookmarksFile> {
         if !self.path.exists() {
-            return Ok(BookmarksFile { version: 1, bookmarks: vec![] });
+            return Ok(BookmarksFile {
+                version: 1,
+                bookmarks: vec![],
+            });
         }
         let text = fs::read_to_string(&self.path)?;
         let file: BookmarksFile = serde_json::from_str(&text)

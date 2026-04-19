@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -35,9 +36,61 @@ pub struct Transfer {
     pub error: Option<String>,
 }
 
+/// Shared control flag for an in-flight transfer.
+///
+/// Values:
+/// - 0 = Run (no action requested)
+/// - 1 = Pause requested
+/// - 2 = Cancel requested
+const CTRL_RUN: u8 = 0;
+const CTRL_PAUSE: u8 = 1;
+const CTRL_CANCEL: u8 = 2;
+
+/// Trait consumed by protocol impls to cooperatively pause/cancel a transfer.
+pub trait TransferControl: Send + Sync {
+    fn should_pause(&self) -> bool;
+    fn should_cancel(&self) -> bool;
+}
+
+#[derive(Debug, Default)]
+pub struct AtomicControl {
+    flag: AtomicU8,
+}
+
+impl AtomicControl {
+    pub fn new() -> Self {
+        Self {
+            flag: AtomicU8::new(CTRL_RUN),
+        }
+    }
+
+    pub fn request_pause(&self) {
+        self.flag.store(CTRL_PAUSE, Ordering::SeqCst);
+    }
+
+    pub fn request_cancel(&self) {
+        self.flag.store(CTRL_CANCEL, Ordering::SeqCst);
+    }
+
+    pub fn reset(&self) {
+        self.flag.store(CTRL_RUN, Ordering::SeqCst);
+    }
+}
+
+impl TransferControl for AtomicControl {
+    fn should_pause(&self) -> bool {
+        self.flag.load(Ordering::SeqCst) == CTRL_PAUSE
+    }
+
+    fn should_cancel(&self) -> bool {
+        self.flag.load(Ordering::SeqCst) == CTRL_CANCEL
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct TransferQueue {
     inner: Arc<Mutex<VecDeque<Transfer>>>,
+    controls: Arc<Mutex<HashMap<String, Arc<AtomicControl>>>>,
 }
 
 impl TransferQueue {
@@ -96,5 +149,29 @@ impl TransferQueue {
 
     pub async fn get(&self, id: &str) -> Option<Transfer> {
         self.inner.lock().await.iter().find(|t| t.id == id).cloned()
+    }
+
+    /// Obtain (or create) the control flag for a transfer id.
+    pub async fn control(&self, id: &str) -> Arc<AtomicControl> {
+        let mut map = self.controls.lock().await;
+        map.entry(id.to_string())
+            .or_insert_with(|| Arc::new(AtomicControl::new()))
+            .clone()
+    }
+
+    pub async fn request_pause(&self, id: &str) {
+        if let Some(c) = self.controls.lock().await.get(id) {
+            c.request_pause();
+        }
+    }
+
+    pub async fn request_cancel(&self, id: &str) {
+        if let Some(c) = self.controls.lock().await.get(id) {
+            c.request_cancel();
+        }
+    }
+
+    pub async fn clear_control(&self, id: &str) {
+        self.controls.lock().await.remove(id);
     }
 }

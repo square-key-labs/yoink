@@ -8,18 +8,35 @@
   "permissions": [
     "core:default",
     "core:webview:allow-internal-toggle-devtools",
+    "core:window:allow-start-dragging",
+    "core:window:allow-is-fullscreen",
     "opener:default",
     "dialog:default",
+    "dialog:allow-ask",
     "fs:default",
     "fs:allow-home-read-recursive",
     "fs:allow-home-write-recursive",
     "fs:allow-read-dir",
     "fs:allow-stat",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        { "path": "$HOME" },
+        { "path": "$HOME/*" },
+        { "path": "$HOME/**" },
+        { "path": "$HOME/.*" },
+        { "path": "$HOME/.*/**" },
+        { "path": "/" },
+        { "path": "/*" },
+        { "path": "/**" }
+      ]
+    },
     "shell:default",
     "shell:allow-open",
     "os:default",
     "notification:default",
     "notification:allow-notify",
-    "store:default"
+    "store:default",
+    "clipboard-manager:default"
   ]
 }
