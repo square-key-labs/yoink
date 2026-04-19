@@ -30,7 +30,7 @@ anyhow = "1.0.102"
 async-trait = "0.1.89"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-russh = "0.60.0"
+russh = { version = "0.60.0", default-features = false, features = ["flate2", "ring", "rsa"] }
 russh-sftp = "2.1.1"
 suppaftp = { version = "8", features = ["tokio"] }
 zeroize = { version = "1.8.2", features = ["derive"] }
