@@ -1,3 +1,8 @@
+#![allow(dead_code)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::suspicious_open_options)]
+
 mod bookmarks;
 mod commands;
 mod error;

@@ -58,7 +58,7 @@ impl SessionPool {
             guard
                 .get(id)
                 .cloned()
-                .ok_or_else(|| crate::error::YoinkError::NotConnected)?
+                .ok_or(crate::error::YoinkError::NotConnected)?
         };
         let mut s = session.lock().await;
         s.protocol.list_dir(path).await
